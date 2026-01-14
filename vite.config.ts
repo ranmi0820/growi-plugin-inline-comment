@@ -4,7 +4,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   plugins: [react()],
   build: {
-    manifest: true,
+    manifest: 'manifest.json', // ★ここが重要（dist/manifest.jsonに出る）
     rollupOptions: {
       input: ['/client-entry.tsx'],
     },
