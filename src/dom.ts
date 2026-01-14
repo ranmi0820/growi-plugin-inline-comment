@@ -3,12 +3,17 @@ export type Placeholder = {
   mountEl: HTMLElement;
 };
 
+const MARKER = '@comment';
+
 export function findAndMountPlaceholders(): Placeholder[] {
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const textNodes: Text[] = [];
+
   while (walker.nextNode()) {
     const t = walker.currentNode as Text;
-    if (t.nodeValue && t.nodeValue.includes('$comment')) textNodes.push(t);
+    if (t.nodeValue && t.nodeValue.includes(MARKER)) {
+      textNodes.push(t);
+    }
   }
 
   const placeholders: Placeholder[] = [];
@@ -16,22 +21,23 @@ export function findAndMountPlaceholders(): Placeholder[] {
 
   for (const textNode of textNodes) {
     let text = textNode.nodeValue ?? '';
-    // テキストノード内に複数 $comment がある可能性もあるのでループ
-    while (text.includes('$comment')) {
-      // 1つ分だけ除去して、その場所にmountを挿入
+
+    while (text.includes(MARKER)) {
       const mount = document.createElement('span');
       mount.className = 'inline-comment-mount';
       mount.style.display = 'block';
       mount.style.margin = '10px 0';
 
-      // 先頭の $comment を消す
-      text = text.replace('$comment', '');
+      // @comment を1個だけ消す
+      text = text.replace(MARKER, '');
       textNode.nodeValue = text;
 
-      // $comment が含まれていたテキストの直前に挿入（見た目が自然）
       textNode.parentNode?.insertBefore(mount, textNode);
 
-      placeholders.push({ placeholderIndex: idx++, mountEl: mount });
+      placeholders.push({
+        placeholderIndex: idx++,
+        mountEl: mount,
+      });
     }
   }
 
