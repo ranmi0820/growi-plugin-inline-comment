@@ -33,6 +33,7 @@ function mount() {
 
 const activate = (growiFacade: GrowiFacade): void => {
   // 描画が落ち着いてから
+  console.log('[inline-comment] activate called', { growiFacade });
   setTimeout(() => {
     try {
       mount();
