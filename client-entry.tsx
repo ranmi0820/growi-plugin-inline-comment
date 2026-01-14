@@ -7,15 +7,14 @@ console.log('[inline-comment] client-entry loaded');
 
 type GrowiFacade = any;
 
-// 中継API（後でnginxでGROWIと同一ドメイン配下に置くのがおすすめ）
+// 中継API（nginxでGROWIと同一ドメイン配下に置くのがおすすめ）
 const ENDPOINT = '/growi-comment-inline/';
 
 function getPagePath(): string {
-  // GROWIのURLに合わせて必要なら調整
   return decodeURIComponent(location.pathname);
 }
 
-function mount() {
+function mountOnce() {
   const path = getPagePath();
   const placeholders = findAndMountPlaceholders();
 
@@ -31,16 +30,32 @@ function mount() {
   }
 }
 
-const activate = (growiFacade: GrowiFacade): void => {
-  // 描画が落ち着いてから
-  console.log('[inline-comment] activate called', { growiFacade });
-  setTimeout(() => {
+// 連続DOM更新対策：debounceしてまとめてmount
+let timer: number | undefined;
+function scheduleMount() {
+  if (timer != null) window.clearTimeout(timer);
+  timer = window.setTimeout(() => {
     try {
-      mount();
+      mountOnce();
     } catch {
-      // 何もしない
+      // noop
     }
-  }, 0);
+  }, 50);
+}
+
+const activate = (growiFacade: GrowiFacade): void => {
+  console.log('[inline-comment] activate called', { growiFacade });
+
+  // 初回：即時＆遅延でも試す（描画タイミングの揺れ対策）
+  scheduleMount();
+  window.setTimeout(scheduleMount, 200);
+  window.setTimeout(scheduleMount, 800);
+
+  // 本命：SPA遷移/編集保存後のDOM差し替えを監視して都度mount
+  const obs = new MutationObserver(() => scheduleMount());
+  obs.observe(document.body, { childList: true, subtree: true });
+
+  // deactivateで止めたい場合は growiFacade等に保持して解除してください
 };
 
 const deactivate = (): void => {};
