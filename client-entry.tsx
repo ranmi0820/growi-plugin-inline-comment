@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { findAndMountPlaceholders } from './src/dom';
 import { InlineCommentForm } from './src/InlineCommentForm';
 
+console.log('[inline-comment] client-entry loaded');
+
 type GrowiFacade = any;
 
 // 中継API（後でnginxでGROWIと同一ドメイン配下に置くのがおすすめ）
