@@ -41,9 +41,15 @@ export function InlineCommentForm({ endpoint, path, placeholderIndex }: Props) {
         throw new Error(msg || `HTTP ${res.status}`);
       }
 
-      // ★リロードしない：フォームは残す
-      setStatus('投稿しました');
-      setText(''); // 入力だけクリア（名前は残す）
+      // ここで画面更新する
+      setStatus('投稿しました。更新します...');
+      // 入力クリア（任意）
+      setText('');
+
+      // 少しだけ待ってからリロード（ステータス表示が一瞬見える）
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 150);
 
     } catch (e: any) {
       setStatus(`失敗: ${e?.message ?? e}`);
