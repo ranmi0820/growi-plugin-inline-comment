@@ -8,7 +8,7 @@ console.log('[inline-comment] client-entry loaded');
 type GrowiFacade = any;
 
 // 中継API（後でnginxでGROWIと同一ドメイン配下に置くのがおすすめ）
-const ENDPOINT = '/inline-comment/api/post';
+const ENDPOINT = '/growi-comment-inline';
 
 function getPagePath(): string {
   // GROWIのURLに合わせて必要なら調整
