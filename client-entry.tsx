@@ -1,14 +1,17 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { findAndMountPlaceholders } from './src/dom';
+import { findAndMountPlaceholders, findArticleMounts } from './src/dom';
 import { InlineCommentForm } from './src/InlineCommentForm';
+import { ArticlePostForm } from './src/ArticlePostForm';
 
 console.log('[inline-comment] client-entry loaded');
 
 type GrowiFacade = any;
 
-// 中継API（nginxでGROWIと同一ドメイン配下に置くのがおすすめ）
-const ENDPOINT = '/growi-comment-inline/';
+// nginx等で同一ドメイン配下に置く想定
+// コメント: POST `${BASE}/`
+// 記事: POST `${BASE}/article`
+const BASE = '/growi-comment-inline';
 
 function getPagePath(): string {
   return decodeURIComponent(location.pathname);
@@ -16,13 +19,24 @@ function getPagePath(): string {
 
 function mountOnce() {
   const path = getPagePath();
-  const placeholders = findAndMountPlaceholders();
 
+  // ===== 記事投稿フォーム（@article） =====
+  const articleMounts = findArticleMounts();
+  for (const mount of articleMounts) {
+    if (mount.dataset.mounted) continue;
+    mount.dataset.mounted = '1';
+
+    const root = createRoot(mount);
+    root.render(<ArticlePostForm endpoint={`${BASE}/article`} path={path} />);
+  }
+
+  // ===== コメントフォーム（@comment） =====
+  const placeholders = findAndMountPlaceholders();
   for (const p of placeholders) {
     const root = createRoot(p.mountEl);
     root.render(
       <InlineCommentForm
-        endpoint={ENDPOINT}
+        endpoint={`${BASE}/`}
         path={path}
         placeholderIndex={p.placeholderIndex}
       />
@@ -30,7 +44,7 @@ function mountOnce() {
   }
 }
 
-// 連続DOM更新対策：debounceしてまとめてmount
+// DOM差し替えが連続するのでdebounce
 let timer: number | undefined;
 function scheduleMount() {
   if (timer != null) window.clearTimeout(timer);
@@ -43,19 +57,13 @@ function scheduleMount() {
   }, 50);
 }
 
-const activate = (growiFacade: GrowiFacade): void => {
-  console.log('[inline-comment] activate called', { growiFacade });
-
-  // 初回：即時＆遅延でも試す（描画タイミングの揺れ対策）
+const activate = (_growiFacade: GrowiFacade): void => {
   scheduleMount();
   window.setTimeout(scheduleMount, 200);
   window.setTimeout(scheduleMount, 800);
 
-  // 本命：SPA遷移/編集保存後のDOM差し替えを監視して都度mount
   const obs = new MutationObserver(() => scheduleMount());
   obs.observe(document.body, { childList: true, subtree: true });
-
-  // deactivateで止めたい場合は growiFacade等に保持して解除してください
 };
 
 const deactivate = (): void => {};

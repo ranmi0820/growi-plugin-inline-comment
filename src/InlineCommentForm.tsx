@@ -1,7 +1,7 @@
 import React from 'react';
 
 type Props = {
-  endpoint: string;
+  endpoint: string; // 例: /growi-comment-inline/
   path: string;
   placeholderIndex: number;
 };
@@ -41,12 +41,9 @@ export function InlineCommentForm({ endpoint, path, placeholderIndex }: Props) {
         throw new Error(msg || `HTTP ${res.status}`);
       }
 
-      // ここで画面更新する
       setStatus('投稿しました。更新します...');
-      // 入力クリア（任意）
       setText('');
 
-      // 少しだけ待ってからリロード（ステータス表示が一瞬見える）
       window.setTimeout(() => {
         window.location.reload();
       }, 150);
