@@ -18,46 +18,48 @@ function getPagePath(): string {
 }
 
 /**
- * 編集画面（エディタ/プレビュー）ではプラグインを動かさない。
- * React管理DOMを直接触る系のプラグインは編集画面で衝突しやすく、
- * removeChild NotFoundError の原因になるため。
+ * 編集画面（#edit 等）ではプラグインを動かさない
  */
 function isEditLikePage(): boolean {
-  // 1) URLでの判定（環境差があるので広めに拾う）
-  const url = `${location.pathname}${location.search}`.toLowerCase();
+  const pathSearch = `${location.pathname}${location.search}`.toLowerCase();
+  const hash = (location.hash || '').toLowerCase(); // ★重要：#edit を見る
 
-  // ありがちな編集URLパターンを広めに
+  // あなたの環境： /<pageId>#edit
+  if (hash === '#edit' || hash.startsWith('#edit')) return true;
+
+  // 保険：URLに edit 系が含まれるパターンも拾う
   if (
-    url.includes('/_edit') ||
-    url.includes('/edit') ||
-    url.includes('edit=') ||
-    url.includes('mode=edit') ||
-    url.includes('isedit') ||
-    url.includes('pageeditor')
+    pathSearch.includes('/_edit') ||
+    pathSearch.includes('/edit') ||
+    pathSearch.includes('edit=') ||
+    pathSearch.includes('mode=edit')
   ) {
     return true;
   }
 
-  // 2) DOMでの判定（編集画面に出がちなもの）
-  // textarea が存在し、かつ editor/toolbar っぽい要素があるなら編集画面扱い
+  // DOM でも保険（編集画面に textarea がある場合など）
+  // ※ ここは環境差があるので「補助」扱い
   const hasTextarea = !!document.querySelector('textarea');
-  if (!hasTextarea) return false;
+  if (hasTextarea) {
+    const hasEditorHint =
+      !!document.querySelector('[data-testid*="editor"]') ||
+      !!document.querySelector('[data-testid*="toolbar"]') ||
+      !!document.querySelector('[class*="Editor"]') ||
+      !!document.querySelector('[class*="PageEditor"]') ||
+      !!document.querySelector('[class*="MarkdownEditor"]') ||
+      !!document.querySelector('[class*="toolbar"]');
+    if (hasEditorHint) return true;
+  }
 
-  const hasEditorHint =
-    !!document.querySelector('[data-testid*="editor"]') ||
-    !!document.querySelector('[data-testid*="toolbar"]') ||
-    !!document.querySelector('[class*="Editor"]') ||
-    !!document.querySelector('[class*="PageEditor"]') ||
-    !!document.querySelector('[class*="MarkdownEditor"]') ||
-    !!document.querySelector('[class*="toolbar"]');
-
-  return hasTextarea && hasEditorHint;
+  return false;
 }
 
 /**
- * 同一DOMに二重で createRoot しない（StrictMode/再マウント/SPA遷移対策）
+ * 二重 createRoot 防止 & 後で unmount できるように追跡
  */
 const roots = new WeakMap<Element, Root>();
+const mountedEls = new Set<Element>();
+
 function getOrCreateRoot(el: Element): Root {
   const existing = roots.get(el);
   if (existing) return existing;
@@ -66,6 +68,21 @@ function getOrCreateRoot(el: Element): Root {
   return root;
 }
 
+function unmountAll() {
+  for (const el of Array.from(mountedEls)) {
+    try {
+      const root = roots.get(el);
+      root?.unmount();
+    } catch {
+      // noop
+    }
+    mountedEls.delete(el);
+  }
+}
+
+/**
+ * 実際のマウント処理（閲覧画面のみ）
+ */
 function mountOnce() {
   const path = getPagePath();
 
@@ -77,12 +94,13 @@ function mountOnce() {
 
     const root = getOrCreateRoot(mount);
     root.render(<ArticlePostForm endpoint={`${BASE}/article`} path={path} />);
+    mountedEls.add(mount);
   }
 
   // ===== コメントフォーム（@comment） =====
   const placeholders = findAndMountPlaceholders();
   for (const p of placeholders) {
-    // p.mountEl が同じ要素を指し続ける可能性があるので root を使い回す
+    // 同じ mountEl に対して二重 root を作らない
     const root = getOrCreateRoot(p.mountEl);
     root.render(
       <InlineCommentForm
@@ -91,17 +109,32 @@ function mountOnce() {
         placeholderIndex={p.placeholderIndex}
       />,
     );
+    mountedEls.add(p.mountEl);
   }
 }
 
-// DOM差し替えが連続するのでdebounce
+// DOM差し替えが連続するので debounce
 let timer: number | undefined;
+function clearTimer() {
+  if (timer != null) {
+    try {
+      window.clearTimeout(timer);
+    } catch {
+      // noop
+    }
+    timer = undefined;
+  }
+}
+
 function scheduleMount() {
-  if (timer != null) window.clearTimeout(timer);
+  clearTimer();
   timer = window.setTimeout(() => {
     try {
-      // activate 側でガードしているが、念のため二重ガード
-      if (isEditLikePage()) return;
+      // ★ここでも毎回編集判定して止める
+      if (isEditLikePage()) {
+        stopRunning(); // 編集に入った瞬間に確実に止める
+        return;
+      }
       mountOnce();
     } catch {
       // noop
@@ -110,25 +143,9 @@ function scheduleMount() {
 }
 
 let observer: MutationObserver | null = null;
+let started = false;
 
-const activate = (_growiFacade: GrowiFacade): void => {
-  // ★編集画面では何もしない（ここが本命）
-  if (isEditLikePage()) {
-    console.log('[inline-comment] skip on edit page');
-    return;
-  }
-
-  // 初回 + 数回だけ遅延再試行（SPA/遅延描画対策）
-  scheduleMount();
-  window.setTimeout(scheduleMount, 200);
-  window.setTimeout(scheduleMount, 800);
-
-  // 監視（閲覧画面のみ）
-  observer = new MutationObserver(() => scheduleMount());
-  observer.observe(document.body, { childList: true, subtree: true });
-};
-
-const deactivate = (): void => {
+function stopRunning() {
   // observer 停止
   if (observer) {
     try {
@@ -139,17 +156,60 @@ const deactivate = (): void => {
     observer = null;
   }
 
-  // タイマー停止
-  if (timer != null) {
-    try {
-      window.clearTimeout(timer);
-    } catch {
-      // noop
-    }
-    timer = undefined;
+  clearTimer();
+
+  // ★既に挿入した React を外す（編集画面にDOM改変を持ち込まない）
+  unmountAll();
+
+  started = false;
+}
+
+function startRunning() {
+  if (started) return;
+  if (isEditLikePage()) return;
+
+  started = true;
+
+  // 初回 + 少し遅延して再試行（SPA/遅延描画対策）
+  scheduleMount();
+  window.setTimeout(scheduleMount, 200);
+  window.setTimeout(scheduleMount, 800);
+
+  observer = new MutationObserver(() => scheduleMount());
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function handleLocationMaybeChanged() {
+  // ★ハッシュ遷移（#edit）で編集に入るので、必ずここで停止
+  if (isEditLikePage()) {
+    stopRunning();
+  } else {
+    // 閲覧に戻ったら再開（不要なら消してもOK）
+    startRunning();
+  }
+}
+
+const activate = (_growiFacade: GrowiFacade): void => {
+  // 最初から編集なら何もしない
+  if (isEditLikePage()) {
+    console.log('[inline-comment] skip on edit page');
+    stopRunning();
+    return;
   }
 
-  // root は WeakMap なので解放はブラウザに任せる
+  startRunning();
+
+  // ★#edit 切り替えを捕まえる
+  window.addEventListener('hashchange', handleLocationMaybeChanged);
+
+  // SPA遷移やブラウザ戻る/進むでも止めたいので保険
+  window.addEventListener('popstate', handleLocationMaybeChanged);
+};
+
+const deactivate = (): void => {
+  window.removeEventListener('hashchange', handleLocationMaybeChanged);
+  window.removeEventListener('popstate', handleLocationMaybeChanged);
+  stopRunning();
 };
 
 declare global {
