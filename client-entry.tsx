@@ -18,40 +18,12 @@ function getPagePath(): string {
 }
 
 /**
- * 編集画面（#edit 等）ではプラグインを動かさない
+ * ★編集画面判定は「#edit だけ」に絞る
+ * これ以外（textarea 等）で判定するとビューでも誤判定してフォームが消えることがある。
  */
 function isEditLikePage(): boolean {
-  const pathSearch = `${location.pathname}${location.search}`.toLowerCase();
-  const hash = (location.hash || '').toLowerCase(); // ★重要：#edit を見る
-
-  // あなたの環境： /<pageId>#edit
-  if (hash === '#edit' || hash.startsWith('#edit')) return true;
-
-  // 保険：URLに edit 系が含まれるパターンも拾う
-  if (
-    pathSearch.includes('/_edit') ||
-    pathSearch.includes('/edit') ||
-    pathSearch.includes('edit=') ||
-    pathSearch.includes('mode=edit')
-  ) {
-    return true;
-  }
-
-  // DOM でも保険（編集画面に textarea がある場合など）
-  // ※ ここは環境差があるので「補助」扱い
-  const hasTextarea = !!document.querySelector('textarea');
-  if (hasTextarea) {
-    const hasEditorHint =
-      !!document.querySelector('[data-testid*="editor"]') ||
-      !!document.querySelector('[data-testid*="toolbar"]') ||
-      !!document.querySelector('[class*="Editor"]') ||
-      !!document.querySelector('[class*="PageEditor"]') ||
-      !!document.querySelector('[class*="MarkdownEditor"]') ||
-      !!document.querySelector('[class*="toolbar"]');
-    if (hasEditorHint) return true;
-  }
-
-  return false;
+  const hash = (location.hash || '').toLowerCase();
+  return hash === '#edit' || hash.startsWith('#edit');
 }
 
 /**
@@ -80,9 +52,6 @@ function unmountAll() {
   }
 }
 
-/**
- * 実際のマウント処理（閲覧画面のみ）
- */
 function mountOnce() {
   const path = getPagePath();
 
@@ -100,7 +69,6 @@ function mountOnce() {
   // ===== コメントフォーム（@comment） =====
   const placeholders = findAndMountPlaceholders();
   for (const p of placeholders) {
-    // 同じ mountEl に対して二重 root を作らない
     const root = getOrCreateRoot(p.mountEl);
     root.render(
       <InlineCommentForm
@@ -130,9 +98,9 @@ function scheduleMount() {
   clearTimer();
   timer = window.setTimeout(() => {
     try {
-      // ★ここでも毎回編集判定して止める
+      // ★毎回 #edit を見て、編集なら止める
       if (isEditLikePage()) {
-        stopRunning(); // 編集に入った瞬間に確実に止める
+        stopRunning();
         return;
       }
       mountOnce();
@@ -146,7 +114,6 @@ let observer: MutationObserver | null = null;
 let started = false;
 
 function stopRunning() {
-  // observer 停止
   if (observer) {
     try {
       observer.disconnect();
@@ -158,7 +125,7 @@ function stopRunning() {
 
   clearTimer();
 
-  // ★既に挿入した React を外す（編集画面にDOM改変を持ち込まない）
+  // ★編集に入ったら外す（ビューへ戻ればまた mount される）
   unmountAll();
 
   started = false;
@@ -170,7 +137,7 @@ function startRunning() {
 
   started = true;
 
-  // 初回 + 少し遅延して再試行（SPA/遅延描画対策）
+  // 初回 + 数回だけ遅延再試行（SPA/遅延描画対策）
   scheduleMount();
   window.setTimeout(scheduleMount, 200);
   window.setTimeout(scheduleMount, 800);
@@ -179,36 +146,29 @@ function startRunning() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-function handleLocationMaybeChanged() {
-  // ★ハッシュ遷移（#edit）で編集に入るので、必ずここで停止
+function handleHashChanged() {
+  // ★#edit の ON/OFF に追従して start/stop
   if (isEditLikePage()) {
     stopRunning();
   } else {
-    // 閲覧に戻ったら再開（不要なら消してもOK）
     startRunning();
   }
 }
 
 const activate = (_growiFacade: GrowiFacade): void => {
-  // 最初から編集なら何もしない
   if (isEditLikePage()) {
     console.log('[inline-comment] skip on edit page');
     stopRunning();
-    return;
+  } else {
+    startRunning();
   }
 
-  startRunning();
-
-  // ★#edit 切り替えを捕まえる
-  window.addEventListener('hashchange', handleLocationMaybeChanged);
-
-  // SPA遷移やブラウザ戻る/進むでも止めたいので保険
-  window.addEventListener('popstate', handleLocationMaybeChanged);
+  // ★あなたの環境は #edit なので hashchange を監視すれば十分
+  window.addEventListener('hashchange', handleHashChanged);
 };
 
 const deactivate = (): void => {
-  window.removeEventListener('hashchange', handleLocationMaybeChanged);
-  window.removeEventListener('popstate', handleLocationMaybeChanged);
+  window.removeEventListener('hashchange', handleHashChanged);
   stopRunning();
 };
 
