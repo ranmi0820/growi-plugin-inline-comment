@@ -7,31 +7,28 @@ const COMMENT_TEXT_MARKER = '@comment';
 const ARTICLE_TEXT_MARKER = '@article';
 const COMMENT_MARKER_PREFIX = 'inline-comment:'; // 保険：HTMLコメント形式
 
+// この記事（スクショ）で本文はここに確定
+const VIEW_ROOT_SELECTOR = '#page-view-content-container .wiki';
+
 // アンカー（不可視）に付ける属性名
 const COMMENT_ANCHOR_ATTR = 'data-inline-comment-anchor';
 const ARTICLE_ANCHOR_ATTR = 'data-inline-article-anchor';
 
-// アンカーに「mount 済み」を刻む属性
+// アンカーに「mount 済み」を刻む属性（冪等化）
 const COMMENT_MOUNTED_ATTR = 'data-inline-comment-mounted';
 const ARTICLE_MOUNTED_ATTR = 'data-inline-article-mounted';
 
-// 触らない領域（markdown の code / pre など）
-function isInNoTouchArea(el: Element | null): boolean {
-  if (!el) return false;
-  return !!el.closest('pre, code, kbd, samp');
+// HTMLコメント用ガード
+const HTML_ANCHOR_ATTR = 'data-inline-comment-html-anchor';
+
+export function getViewRoot(): HTMLElement | null {
+  return document.querySelector(VIEW_ROOT_SELECTOR);
 }
 
-/**
- * プラグインが処理対象にするルート。
- * body 全体を触ると React 管理領域まで巻き込みやすいので、まず wiki 本文に限定する。
- */
-function getScanRoot(): Element {
-  return (
-    document.querySelector('.wiki') ||
-    document.querySelector('.markdown-body') ||
-    document.querySelector('#content-main') ||
-    document.body
-  );
+function isInNoTouchArea(el: Element | null): boolean {
+  if (!el) return false;
+  // Markdown の code/pre 内は触らない
+  return !!el.closest('pre, code, kbd, samp');
 }
 
 function createCommentMountEl(): HTMLElement {
@@ -49,12 +46,8 @@ function createArticleMountEl(): HTMLElement {
   return mount;
 }
 
-/**
- * 安全に removeChild
- */
 function safeRemoveChild(parent: Node, child: Node) {
   try {
-    // contains がある環境なら、親子関係が壊れている場合は何もしない
     const anyParent = parent as any;
     if (typeof anyParent.contains === 'function' && !anyParent.contains(child)) return;
     parent.removeChild(child);
@@ -63,26 +56,33 @@ function safeRemoveChild(parent: Node, child: Node) {
   }
 }
 
+function sortDomOrder(nodes: Node[]): Node[] {
+  return nodes.sort((a, b) => {
+    if (a === b) return 0;
+    const pos = a.compareDocumentPosition(b);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    return 1;
+  });
+}
+
 /**
  * 指定マーカー(@comment/@article)を含むTextノードを分割し、
  * マーカー部分を「見えないアンカー要素」に置換する。
  *
- * - 例: "aaa @comment bbb"
- *   → "aaa " + <span data-... style="display:none"> + " bbb"
- *
- * ★重要: 何度走っても壊れない（冪等）ように、
- *   - pre/code 内は触らない
- *   - 対象を scanRoot に限定
+ * ★重要:
+ * - 触るのは「ビュー本文の .wiki だけ」
+ * - mount 内や code/pre 内は触らない
+ * - 何度走っても壊れない（冪等）
  */
 function replaceTextMarkerWithHiddenAnchors(
+  root: HTMLElement,
   marker: string,
   anchorAttrName: string
 ): HTMLElement[] {
   const anchors: HTMLElement[] = [];
-  const scanRoot = getScanRoot();
 
   const walker = document.createTreeWalker(
-    scanRoot,
+    root,
     NodeFilter.SHOW_TEXT,
     {
       acceptNode: (node) => {
@@ -121,7 +121,6 @@ function replaceTextMarkerWithHiddenAnchors(
       const parent = cur.parentNode;
       if (!parent) break;
 
-      // 途中で親が差し替わる可能性があるので、毎回 contains を確認
       const anyParent = parent as any;
       if (typeof anyParent.contains === 'function' && !anyParent.contains(cur)) break;
 
@@ -132,14 +131,12 @@ function replaceTextMarkerWithHiddenAnchors(
         parent.insertBefore(document.createTextNode(before), cur);
       }
 
-      // アンカー
       const anchor = document.createElement('span');
       anchor.setAttribute(anchorAttrName, '1');
       anchor.style.display = 'none';
       parent.insertBefore(anchor, cur);
       anchors.push(anchor);
 
-      // 残りを newText にして cur を置き換え（cur は安全に remove）
       if (after.length > 0) {
         const newText = document.createTextNode(after);
         parent.insertBefore(newText, cur);
@@ -156,34 +153,20 @@ function replaceTextMarkerWithHiddenAnchors(
 }
 
 /**
- * DOM順ソート（Node.compareDocumentPosition を利用）
- */
-function sortDomOrder(nodes: Node[]): Node[] {
-  return nodes.sort((a, b) => {
-    if (a === b) return 0;
-    const pos = a.compareDocumentPosition(b);
-    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-    return 1;
-  });
-}
-
-/**
  * @article の位置に記事投稿フォームを表示するための mount を返す
  */
 export function findArticleMounts(): HTMLElement[] {
-  // まず @article の文字を見えないアンカーへ
-  replaceTextMarkerWithHiddenAnchors(ARTICLE_TEXT_MARKER, ARTICLE_ANCHOR_ATTR);
+  const root = getViewRoot();
+  if (!root) return [];
 
-  // 既存アンカー収集（テキスト置換由来 + 既存DOM由来）
-  const scanRoot = getScanRoot();
-  const anchors = Array.from(
-    scanRoot.querySelectorAll<HTMLElement>(`span[${ARTICLE_ANCHOR_ATTR}]`)
-  );
+  // まず @article の文字をアンカーへ（存在するなら）
+  replaceTextMarkerWithHiddenAnchors(root, ARTICLE_TEXT_MARKER, ARTICLE_ANCHOR_ATTR);
+
+  // アンカー収集（本文内のみ）
+  const anchors = Array.from(root.querySelectorAll<HTMLElement>(`span[${ARTICLE_ANCHOR_ATTR}]`));
 
   const mounts: HTMLElement[] = [];
-
   for (const a of anchors) {
-    // 既に mount 済みなら何もしない（★近傍判定ではなくアンカーに刻む）
     if (a.getAttribute(ARTICLE_MOUNTED_ATTR) === '1') continue;
 
     const parent = a.parentNode;
@@ -204,21 +187,22 @@ export function findArticleMounts(): HTMLElement[] {
  * placeholderIndex 順に返す
  */
 export function findAndMountPlaceholders(): Placeholder[] {
+  const root = getViewRoot();
+  if (!root) return [];
+
   const placeholders: Placeholder[] = [];
   let idx = 0;
 
-  // A) まず @comment の文字を見えないアンカーへ
-  replaceTextMarkerWithHiddenAnchors(COMMENT_TEXT_MARKER, COMMENT_ANCHOR_ATTR);
+  // A) @comment の文字をアンカーへ（存在するなら）
+  replaceTextMarkerWithHiddenAnchors(root, COMMENT_TEXT_MARKER, COMMENT_ANCHOR_ATTR);
 
-  const scanRoot = getScanRoot();
-
-  // B) リレー側が置換した span(data-inline-comment="...") も拾う
+  // B) リレー側が置換した span(data-inline-comment="...") も拾う + テキスト置換アンカー
   const spanAnchors = Array.from(
-    scanRoot.querySelectorAll<HTMLElement>(`span[data-inline-comment], span[${COMMENT_ANCHOR_ATTR}]`)
+    root.querySelectorAll<HTMLElement>(`span[data-inline-comment], span[${COMMENT_ANCHOR_ATTR}]`)
   );
 
-  // C) さらに保険で HTMLコメント <!-- inline-comment:... --> を拾う
-  const commentWalker = document.createTreeWalker(scanRoot, NodeFilter.SHOW_COMMENT, null);
+  // C) HTMLコメント <!-- inline-comment:... --> も拾う（本文内のみ）
+  const commentWalker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT, null);
   const htmlCommentAnchors: Comment[] = [];
   while (commentWalker.nextNode()) {
     const c = commentWalker.currentNode as Comment;
@@ -227,22 +211,19 @@ export function findAndMountPlaceholders(): Placeholder[] {
     }
   }
 
-  // D) 全アンカーをDOM順でまとめる
+  // D) DOM順にまとめる
   const allAnchors: Node[] = sortDomOrder([...spanAnchors, ...htmlCommentAnchors]);
 
-  // E) DOM順に mount を差し込み、placeholderIndex を付与
+  // E) mount を差し込む（冪等：アンカーに mounted フラグ）
   for (const node of allAnchors) {
-    // span アンカーの場合は、アンカー自身に mounted フラグを刻む
+    // span アンカー
     if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
 
-      // mount 自体や code/pre 内は触らない
       if (el.closest('.inline-comment-mount') || el.closest('.inline-article-mount')) continue;
       if (isInNoTouchArea(el)) continue;
 
-      if (el.getAttribute(COMMENT_MOUNTED_ATTR) === '1') {
-        continue;
-      }
+      if (el.getAttribute(COMMENT_MOUNTED_ATTR) === '1') continue;
 
       const parent = el.parentNode;
       if (!parent) continue;
@@ -252,26 +233,20 @@ export function findAndMountPlaceholders(): Placeholder[] {
 
       el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
 
-      placeholders.push({
-        placeholderIndex: idx++,
-        mountEl: mount,
-      });
-
+      placeholders.push({ placeholderIndex: idx++, mountEl: mount });
       continue;
     }
 
-    // HTMLコメント（Commentノード）の場合：属性が付けられないので、
-    // 前に span マーカーを差し込んでそれに mounted フラグを刻む（冪等化）
+    // HTMLコメント（Commentノード）
     if (node.nodeType === Node.COMMENT_NODE) {
       const c = node as Comment;
       const parent = c.parentNode;
       if (!parent) continue;
 
-      // 直前に “管理用span” があるなら再利用
       const prev = c.previousSibling;
       if (prev && prev.nodeType === Node.ELEMENT_NODE) {
         const prevEl = prev as HTMLElement;
-        if (prevEl.getAttribute('data-inline-comment-html-anchor') === '1') {
+        if (prevEl.getAttribute(HTML_ANCHOR_ATTR) === '1') {
           if (prevEl.getAttribute(COMMENT_MOUNTED_ATTR) === '1') continue;
 
           const mount = createCommentMountEl();
@@ -283,9 +258,8 @@ export function findAndMountPlaceholders(): Placeholder[] {
         }
       }
 
-      // 新規に管理用spanを追加
       const guard = document.createElement('span');
-      guard.setAttribute('data-inline-comment-html-anchor', '1');
+      guard.setAttribute(HTML_ANCHOR_ATTR, '1');
       guard.style.display = 'none';
       parent.insertBefore(guard, c);
 
@@ -294,7 +268,6 @@ export function findAndMountPlaceholders(): Placeholder[] {
 
       guard.setAttribute(COMMENT_MOUNTED_ATTR, '1');
       placeholders.push({ placeholderIndex: idx++, mountEl: mount });
-
       continue;
     }
   }
