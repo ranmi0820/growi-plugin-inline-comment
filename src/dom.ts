@@ -56,8 +56,11 @@ function sortDomOrder(nodes: Node[]): Node[] {
  * - <p>@comment</p> のような単独行を優先
  */
 function findMarkerElements(root: HTMLElement, marker: string): HTMLElement[] {
-  // よく本文を構成する要素を中心に探す（重くしない）
-  const candidates = Array.from(root.querySelectorAll<HTMLElement>('p, li, blockquote, div, span'));
+  // div / span は拾わない（他DOMとの競合を避ける）
+  // 行になりやすい要素だけに限定
+  const candidates = Array.from(
+    root.querySelectorAll<HTMLElement>('p, li, blockquote')
+  );
 
   const hits: HTMLElement[] = [];
   for (const el of candidates) {
@@ -67,8 +70,6 @@ function findMarkerElements(root: HTMLElement, marker: string): HTMLElement[] {
     const text = (el.textContent || '').trim();
     if (!text.includes(marker)) continue;
 
-    // 「行として marker だけ」(または前後空白のみ) を優先的に扱いやすい
-    // ただし混在でも一応対応：含んでいれば対象にする
     hits.push(el);
   }
   return hits;
