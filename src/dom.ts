@@ -170,9 +170,10 @@ function insertAllMountsForMarker(
     mounts.push(mount);
   }
 
-  // marker だけの行だった場合など、結果的に空に近いなら要素ごと隠す
+  // marker削除後、要素が実質空でも mount が入っているなら消さない
+  const hasMount = !!el.querySelector('.inline-comment-mount, .inline-article-mount');
   const compact = (el.textContent || '').replace(/[\s\u00A0]+/g, '');
-  if (compact === '') {
+  if (!hasMount && compact === '') {
     el.style.setProperty('display', 'none', 'important');
   }
 
