@@ -17,9 +17,6 @@ const ARTICLE_MOUNTED_ATTR = 'data-inline-article-mounted';
 // HTMLコメント用ガード
 const HTML_ANCHOR_ATTR = 'data-inline-comment-html-anchor';
 
-// ビューで marker 行を隠したか（冪等化）
-const MARKER_HIDDEN_ATTR = 'data-inline-marker-hidden';
-
 function getViewRoot(): HTMLElement | null {
   return document.querySelector(VIEW_ROOT_SELECTOR);
 }
@@ -54,22 +51,6 @@ function sortDomOrder(nodes: Node[]): Node[] {
 }
 
 /**
- * ビューでのみ、marker の「単独行」を非表示にする。
- * - 例: <p>@comment</p> / <li>@article</li>
- * - 文中に混ざるケースを誤爆しないように完全一致のみ
- */
-function hideMarkerLineIfExact(el: HTMLElement, marker: string): void {
-  if (!el) return;
-  if (el.getAttribute(MARKER_HIDDEN_ATTR) === '1') return;
-
-  const text = (el.textContent || '').trim();
-  if (text !== marker) return;
-
-  el.setAttribute(MARKER_HIDDEN_ATTR, '1');
-  el.style.setProperty('display', 'none', 'important');
-}
-
-/**
  * marker を含む「行（要素）」を拾う。
  * - div / span は拾わない（他DOMとの競合を避ける）
  * - 行になりやすい要素だけに限定
@@ -90,10 +71,118 @@ function findMarkerElements(root: HTMLElement, marker: string): HTMLElement[] {
   return hits;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 要素 el の中から marker を含む Textノードを探し、
+ * 最初の出現（"@comment" / '@comment' / “@comment” 等も含む）を返す
+ */
+function findFirstMarkerTextNode(
+  el: HTMLElement,
+  marker: string
+): { node: Text; index: number; length: number } | null {
+  // 例: "@comment" / '@comment' / “@comment” / @comment（空白挟みも許容）
+  const re = new RegExp(`["'“”]?\\s*${escapeRegExp(marker)}\\s*["'“”]?`);
+
+  const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => {
+      const parent = (n as Text).parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('.inline-comment-mount, .inline-article-mount')) return NodeFilter.FILTER_REJECT;
+      if (isInNoTouchArea(parent)) return NodeFilter.FILTER_REJECT;
+
+      const v = (n.nodeValue || '');
+      return re.test(v) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
+  });
+
+  while (tw.nextNode()) {
+    const t = tw.currentNode as Text;
+    const v = t.nodeValue || '';
+    const m = re.exec(v);
+    if (!m) continue;
+    return { node: t, index: m.index, length: m[0].length };
+  }
+
+  return null;
+}
+
+/**
+ * marker を含む Textノードを分割して、
+ * その位置に mount を挿入し、marker文字列（引用符込み）を DOM から除去する
+ */
+function insertMountAtMarker(el: HTMLElement, marker: string, mount: HTMLElement): boolean {
+  const hit = findFirstMarkerTextNode(el, marker);
+  if (!hit) return false;
+
+  const { node, index, length } = hit;
+
+  // [before][match][after]
+  const matchNode = node.splitText(index);
+  const afterNode = matchNode.splitText(length);
+
+  const parent = matchNode.parentNode;
+  if (!parent) return false;
+
+  // mount を match の直前に挿入（= ちょうど "@comment" 行の位置）
+  parent.insertBefore(mount, matchNode);
+
+  // match（"@comment" 等）を削除
+  parent.removeChild(matchNode);
+
+  // 後ろの先頭空白を軽く削る
+  if (afterNode.nodeValue) {
+    afterNode.nodeValue = afterNode.nodeValue.replace(/^\s+/, '');
+  }
+
+  // <br><br> になって空行が増えたら片方消す
+  const prev = mount.previousSibling;
+  const next = mount.nextSibling;
+  const prevIsBr = prev && prev.nodeType === Node.ELEMENT_NODE && (prev as Element).tagName === 'BR';
+  const nextIsBr = next && next.nodeType === Node.ELEMENT_NODE && (next as Element).tagName === 'BR';
+  if (prevIsBr && nextIsBr) {
+    try { (next as Element).remove(); } catch { /* noop */ }
+  }
+
+  return true;
+}
+
+/**
+ * el 内の marker をすべて処理して mount を複数挿入する
+ * - 戻り値: 挿入した mount の配列
+ */
+function insertAllMountsForMarker(
+  el: HTMLElement,
+  marker: string,
+  createMount: () => HTMLElement
+): HTMLElement[] {
+  const mounts: HTMLElement[] = [];
+
+  // 同一要素内に複数 marker があり得るので繰り返す
+  // 無限ループ防止に safety
+  let safety = 0;
+  while (safety++ < 50) {
+    const mount = createMount();
+    const ok = insertMountAtMarker(el, marker, mount);
+    if (!ok) break;
+    mounts.push(mount);
+  }
+
+  // marker だけの行だった場合など、結果的に空に近いなら要素ごと隠す
+  const compact = (el.textContent || '').replace(/[\s\u00A0]+/g, '');
+  if (compact === '') {
+    el.style.setProperty('display', 'none', 'important');
+  }
+
+  return mounts;
+}
+
 /**
  * @article の位置に記事投稿フォームを表示するための mount を返す
- * - mount は @article を含む要素の「直前」に挿入
- * - ★ビューでは @article 単独行だけ非表示にする（編集テキストは無関係）
+ * - mount は @article の「文字列位置」に挿入（p全体の前ではない）
+ * - marker 文字列はビューから除去
  */
 export function findArticleMounts(): HTMLElement[] {
   const root = getViewRoot();
@@ -103,19 +192,13 @@ export function findArticleMounts(): HTMLElement[] {
   const mounts: HTMLElement[] = [];
 
   for (const t of targets) {
+    // 要素単位の冪等化（同じ要素を何度も処理しない）
     if (t.getAttribute(ARTICLE_MOUNTED_ATTR) === '1') continue;
 
-    const parent = t.parentNode;
-    if (!parent) continue;
-
-    const mount = createArticleMountEl();
-    parent.insertBefore(mount, t);
-
-    // ★追加：ビューでは @article 単独行を消す（完全一致のみ）
-    hideMarkerLineIfExact(t, ARTICLE_TEXT_MARKER);
+    const inserted = insertAllMountsForMarker(t, ARTICLE_TEXT_MARKER, createArticleMountEl);
+    mounts.push(...inserted);
 
     t.setAttribute(ARTICLE_MOUNTED_ATTR, '1');
-    mounts.push(mount);
   }
 
   return mounts;
@@ -125,9 +208,8 @@ export function findArticleMounts(): HTMLElement[] {
  * @comment の位置にコメントフォームを表示するための mount を差し込み、
  * placeholderIndex 順に返す
  *
- * - mount は @comment を含む要素の「直前」に挿入
+ * - 文字列 @comment はビューから除去（"@comment" 等も除去）
  * - さらに、サーバが置換した <span data-inline-comment="..."></span> も拾う
- * - ★ビューでは @comment 単独行だけ非表示にする（編集テキストは無関係）
  */
 export function findAndMountPlaceholders(): Placeholder[] {
   const root = getViewRoot();
@@ -160,24 +242,16 @@ export function findAndMountPlaceholders(): Placeholder[] {
     if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
 
-      // 文字列行かどうか
-      const isTextLine = ((el.textContent || '').trim().includes(COMMENT_TEXT_MARKER));
-
-      // A-1) 文字列 @comment 行
-      if (isTextLine) {
+      // A-1) 文字列 @comment を含む（p/li/blockquote）
+      if (el.matches('p, li, blockquote')) {
         if (el.getAttribute(COMMENT_MOUNTED_ATTR) === '1') continue;
 
-        const parent = el.parentNode;
-        if (!parent) continue;
-
-        const mount = createCommentMountEl();
-        parent.insertBefore(mount, el);
-
-        // ★追加：ビューでは @comment 単独行を消す（完全一致のみ）
-        hideMarkerLineIfExact(el, COMMENT_TEXT_MARKER);
+        const inserted = insertAllMountsForMarker(el, COMMENT_TEXT_MARKER, createCommentMountEl);
+        for (const m of inserted) {
+          placeholders.push({ placeholderIndex: idx++, mountEl: m });
+        }
 
         el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
-        placeholders.push({ placeholderIndex: idx++, mountEl: mount });
         continue;
       }
 
@@ -191,7 +265,7 @@ export function findAndMountPlaceholders(): Placeholder[] {
         const mount = createCommentMountEl();
         parent.insertBefore(mount, el);
 
-        // 任意：アンカーspan自体が見えて邪魔なら隠す（表示上は不要）
+        // アンカーspanはビューでは不要なので隠す
         el.style.setProperty('display', 'none', 'important');
 
         el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
