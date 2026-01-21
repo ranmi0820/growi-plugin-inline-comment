@@ -17,6 +17,9 @@ const ARTICLE_MOUNTED_ATTR = 'data-inline-article-mounted';
 // HTMLコメント用ガード
 const HTML_ANCHOR_ATTR = 'data-inline-comment-html-anchor';
 
+// ビューで marker 行を隠したか（冪等化）
+const MARKER_HIDDEN_ATTR = 'data-inline-marker-hidden';
+
 function getViewRoot(): HTMLElement | null {
   return document.querySelector(VIEW_ROOT_SELECTOR);
 }
@@ -51,16 +54,28 @@ function sortDomOrder(nodes: Node[]): Node[] {
 }
 
 /**
+ * ビューでのみ、marker の「単独行」を非表示にする。
+ * - 例: <p>@comment</p> / <li>@article</li>
+ * - 文中に混ざるケースを誤爆しないように完全一致のみ
+ */
+function hideMarkerLineIfExact(el: HTMLElement, marker: string): void {
+  if (!el) return;
+  if (el.getAttribute(MARKER_HIDDEN_ATTR) === '1') return;
+
+  const text = (el.textContent || '').trim();
+  if (text !== marker) return;
+
+  el.setAttribute(MARKER_HIDDEN_ATTR, '1');
+  el.style.setProperty('display', 'none', 'important');
+}
+
+/**
  * marker を含む「行（要素）」を拾う。
- * - 文字列自体は消さない（表示として残す）
- * - <p>@comment</p> のような単独行を優先
+ * - div / span は拾わない（他DOMとの競合を避ける）
+ * - 行になりやすい要素だけに限定
  */
 function findMarkerElements(root: HTMLElement, marker: string): HTMLElement[] {
-  // div / span は拾わない（他DOMとの競合を避ける）
-  // 行になりやすい要素だけに限定
-  const candidates = Array.from(
-    root.querySelectorAll<HTMLElement>('p, li, blockquote')
-  );
+  const candidates = Array.from(root.querySelectorAll<HTMLElement>('p, li, blockquote'));
 
   const hits: HTMLElement[] = [];
   for (const el of candidates) {
@@ -77,7 +92,8 @@ function findMarkerElements(root: HTMLElement, marker: string): HTMLElement[] {
 
 /**
  * @article の位置に記事投稿フォームを表示するための mount を返す
- * 文字列 @article は消さない。@article を含む要素の「直前」に mount を挿入する。
+ * - mount は @article を含む要素の「直前」に挿入
+ * - ★ビューでは @article 単独行だけ非表示にする（編集テキストは無関係）
  */
 export function findArticleMounts(): HTMLElement[] {
   const root = getViewRoot();
@@ -95,6 +111,9 @@ export function findArticleMounts(): HTMLElement[] {
     const mount = createArticleMountEl();
     parent.insertBefore(mount, t);
 
+    // ★追加：ビューでは @article 単独行を消す（完全一致のみ）
+    hideMarkerLineIfExact(t, ARTICLE_TEXT_MARKER);
+
     t.setAttribute(ARTICLE_MOUNTED_ATTR, '1');
     mounts.push(mount);
   }
@@ -106,9 +125,9 @@ export function findArticleMounts(): HTMLElement[] {
  * @comment の位置にコメントフォームを表示するための mount を差し込み、
  * placeholderIndex 順に返す
  *
- * 文字列 @comment は消さない。@comment を含む要素の「直前」に mount を挿入する。
- *
- * さらに、サーバが置換した <span data-inline-comment="..."></span> も拾う（これは文字列ではないため）。
+ * - mount は @comment を含む要素の「直前」に挿入
+ * - さらに、サーバが置換した <span data-inline-comment="..."></span> も拾う
+ * - ★ビューでは @comment 単独行だけ非表示にする（編集テキストは無関係）
  */
 export function findAndMountPlaceholders(): Placeholder[] {
   const root = getViewRoot();
@@ -134,22 +153,17 @@ export function findAndMountPlaceholders(): Placeholder[] {
   }
 
   // 4) DOM順でまとめる
-  const nodes: Node[] = sortDomOrder([
-    ...textTargets,
-    ...spanAnchors,
-    ...htmlCommentAnchors,
-  ]);
+  const nodes: Node[] = sortDomOrder([...textTargets, ...spanAnchors, ...htmlCommentAnchors]);
 
   for (const node of nodes) {
-    // A) 文字列ターゲット（HTMLElement）
+    // A) Element
     if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement;
 
-      // サーバ span と文字列行は区別したい：
-      // - 文字列行は el.textContent に @comment があるはず
-      // - サーバ span は textContent 空のことが多い
+      // 文字列行かどうか
       const isTextLine = ((el.textContent || '').trim().includes(COMMENT_TEXT_MARKER));
 
+      // A-1) 文字列 @comment 行
       if (isTextLine) {
         if (el.getAttribute(COMMENT_MOUNTED_ATTR) === '1') continue;
 
@@ -159,13 +173,15 @@ export function findAndMountPlaceholders(): Placeholder[] {
         const mount = createCommentMountEl();
         parent.insertBefore(mount, el);
 
-        el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
+        // ★追加：ビューでは @comment 単独行を消す（完全一致のみ）
+        hideMarkerLineIfExact(el, COMMENT_TEXT_MARKER);
 
+        el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
         placeholders.push({ placeholderIndex: idx++, mountEl: mount });
         continue;
       }
 
-      // B) サーバ span(data-inline-comment)
+      // A-2) サーバ span(data-inline-comment)
       if (el.matches('span[data-inline-comment]')) {
         if (el.getAttribute(COMMENT_MOUNTED_ATTR) === '1') continue;
 
@@ -175,8 +191,10 @@ export function findAndMountPlaceholders(): Placeholder[] {
         const mount = createCommentMountEl();
         parent.insertBefore(mount, el);
 
-        el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
+        // 任意：アンカーspan自体が見えて邪魔なら隠す（表示上は不要）
+        el.style.setProperty('display', 'none', 'important');
 
+        el.setAttribute(COMMENT_MOUNTED_ATTR, '1');
         placeholders.push({ placeholderIndex: idx++, mountEl: mount });
         continue;
       }
@@ -184,7 +202,7 @@ export function findAndMountPlaceholders(): Placeholder[] {
       continue;
     }
 
-    // C) HTMLコメント（Commentノード）
+    // B) HTML Comment node
     if (node.nodeType === Node.COMMENT_NODE) {
       const c = node as Comment;
       const parent = c.parentNode;
