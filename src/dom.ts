@@ -8,7 +8,7 @@ const ARTICLE_TEXT_MARKER = '@article';
 const COMMENT_MARKER_PREFIX = 'inline-comment:'; // 保険：HTMLコメント形式
 
 // 本文はここで確定（あなたのスクショより）
-const VIEW_ROOT_SELECTOR = '#page-view-content-container .wiki';
+const VIEW_ROOT_SELECTOR = '#page-view-content-container .wiki, .wiki:not(.grw-custom-sidebar-content .wiki)';
 
 // ターゲット行に付けるフラグ（冪等化）
 const COMMENT_MOUNTED_ATTR = 'data-inline-comment-mounted';
